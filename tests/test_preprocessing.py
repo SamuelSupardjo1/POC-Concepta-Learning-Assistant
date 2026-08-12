@@ -1,51 +1,49 @@
-from langchain_core.documents import Document
-
+from src.loader import LessonLoader
 from src.preprocessor import TheoryPreprocessor
 
 
 def main():
 
-    documents = [
-        Document(
-            page_content="""
-Lesson 1
+    print("=" * 70)
+    print("REAL PDF - THEORY PREPROCESSING")
+    print("=" * 70)
 
-What is HTML?
+    loader = LessonLoader("knowledge_base/lesson")
 
-HTML stands for HyperText Markup Language.
-It is used to structure content on web pages.
+    documents = loader.load()
 
-<html>
-<body>
-Hello World
-</body>
-</html>
-
-HTML documents consist of elements.
-""",
-            metadata={
-                "lesson": "Lesson 1",
-                "page": 1,
-            },
-        )
-    ]
+    print(f"\nOriginal documents : {len(documents)}")
 
     preprocessor = TheoryPreprocessor()
 
-    processed = preprocessor.process(documents)
+    processed_documents = preprocessor.process(
+        documents
+    )
 
-    print("=" * 60)
-    print("PREPROCESSING TEST")
-    print("=" * 60)
+    print(
+        f"Processed documents: "
+        f"{len(processed_documents)}"
+    )
 
-    print("\n===== ORIGINAL =====")
-    print(documents[0].page_content)
+    # Show selected pages
+    for index in [75, 76, 77, 82, 83, 84, 85]:
 
-    print("\n===== PROCESSED =====")
-    print(processed[0].page_content)
+        if index >= len(processed_documents):
+            continue
 
-    print("\n===== METADATA =====")
-    print(processed[0].metadata)
+        document = processed_documents[index]
+
+        print("\n" + "=" * 70)
+        print(
+            f"DOCUMENT INDEX: {index}"
+        )
+        print("=" * 70)
+
+        print("\nMetadata:")
+        print(document.metadata)
+
+        print("\nProcessed content:")
+        print(document.page_content[:3000])
 
 
 if __name__ == "__main__":
