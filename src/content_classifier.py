@@ -50,88 +50,114 @@ class ContentClassifier:
         "syntax",
     }
 
+    NOISE_EXACT = {
+        "timedoor coding academy",
+        "timedoor academy",
+        "table of contents",
+        "contents",
+    }
+
     NOISE_PATTERNS = [
-        r"^timedoor coding academy$",
-        r"^timedoor academy$",
         r"^source\s*:",
         r"^https?://",
         r"^www\.",
+        r"^page\s+\d+",
+        r"^table\s+of\s+contents\b",
     ]
 
-    def classify(
-        self,
-        block: str,
-        previous_blocks: list[str] | None = None,
-    ) -> ContentType:
+    def classify(self, text: str) -> ContentType:
 
-        text = block.strip()
-
-        if not text:
+        if not text or not text.strip():
             return ContentType.NOISE
 
-        normalized = self.normalize(text)
+        text = text.strip()
 
-        # --------------------------------------------------
-        # 1. Explicit NOISE
-        # --------------------------------------------------
+        # ==================================================
+        # 1. NOISE
+        # ==================================================
 
         if self.is_noise(text):
             return ContentType.NOISE
 
-        # --------------------------------------------------
-        # 2. Explicit CODE
-        # --------------------------------------------------
+        # ==================================================
+        # 2. CODE
+        # ==================================================
 
         if self.is_code(text):
             return ContentType.CODE
 
-        # --------------------------------------------------
-        # 3. Explicit activity / question
-        # --------------------------------------------------
+        # ==================================================
+        # 3. ACTIVITY
+        # ==================================================
 
         if self.is_activity(text):
             return ContentType.ACTIVITY
 
-        # --------------------------------------------------
-        # 4. Lesson / heading structure
-        # --------------------------------------------------
+        # ==================================================
+        # 4. STRUCTURE
+        # ==================================================
 
         if self.is_structure(text):
             return ContentType.STRUCTURE
 
-        # --------------------------------------------------
-        # 5. Default
-        # --------------------------------------------------
+        # ==================================================
+        # 5. DEFAULT
+        # ==================================================
 
         return ContentType.THEORY
-
-    # ======================================================
-    # CLASSIFICATION RULES
-    # ======================================================
 
     def is_noise(self, text: str) -> bool:
 
         normalized = self.normalize(text)
 
-        # Explicit marker
+        # --------------------------------------------------
+        # Exact noise markers
+        # --------------------------------------------------
+
+        if normalized in self.NOISE_EXACT:
+            return True
+
+        # --------------------------------------------------
+        # Code labels
+        #
+        # "Codes" is a label in the PDF, not actual code.
+        # --------------------------------------------------
+
         if normalized in self.CODE_MARKERS:
             return True
+
+        # --------------------------------------------------
+        # Activity labels
+        # --------------------------------------------------
 
         if normalized in self.ACTIVITY_MARKERS:
             return True
 
+        # --------------------------------------------------
         # Page number
+        # --------------------------------------------------
+
         if re.fullmatch(r"\d+", normalized):
             return True
 
+        # --------------------------------------------------
         # Roman page number
+        # --------------------------------------------------
+
         if re.fullmatch(r"[ivxlcdm]+", normalized):
             return True
 
+        # --------------------------------------------------
         # URL / source / repeated header
+        #
+        # IMPORTANT:
+        # use re.match(), not re.fullmatch()
+        # because "Source:" is followed by a URL.
+        # --------------------------------------------------
+
         for pattern in self.NOISE_PATTERNS:
 
-            if re.fullmatch(
+            if re.match(
                 pattern,
                 normalized,
                 re.IGNORECASE,
@@ -175,10 +201,16 @@ class ContentClassifier:
         ):
             return True
 
+        # --------------------------------------------------
         # Common programming symbols
+        # --------------------------------------------------
+
         if (
             ("{" in text and "}" in text)
-            or (";" in text and len(text.split()) < 80)
+            or (
+                ";" in text
+                and len(text.split()) < 80
+            )
         ):
             return True
 
@@ -188,29 +220,50 @@ class ContentClassifier:
 
         normalized = self.normalize(text)
 
+        # --------------------------------------------------
         # Explicit activity marker
+        # --------------------------------------------------
+
         if normalized in self.ACTIVITY_MARKERS:
             return True
 
+        # --------------------------------------------------
         # "Yuk kita coba"
+        # --------------------------------------------------
+
         if re.search(
             r"\b(yuk|ayo)\s+(kita\s+)?coba\b",
             normalized,
         ):
             return True
 
+        # --------------------------------------------------
         # Common activity instructions
+        # --------------------------------------------------
+
         activity_patterns = [
+            # Indonesian
             r"^buatlah\b",
             r"^buat\s",
             r"^tambahkan\b",
             r"^carilah\b",
             r"^cari\s",
             r"^buka\s",
-            r"^buat\s+project\b",
             r"^kerjakan\b",
             r"^gunakan\b",
             r"^lakukan\b",
+
+            # English
+            r"^create\s",
+            r"^create\b",
+            r"^add\s",
+            r"^find\s",
+            r"^open\s",
+            r"^make\s",
+            r"^write\s",
+            r"^build\s",
+            r"^use\s",
+            r"^complete\s",
         ]
 
         for pattern in activity_patterns:
@@ -221,12 +274,17 @@ class ContentClassifier:
             ):
                 return True
 
+        # --------------------------------------------------
         # Numbered instructions
+        # --------------------------------------------------
+
         if re.match(
             r"^\d+[\.\)]\s+",
             normalized,
         ):
+
             instruction_words = [
+                # Indonesian
                 "buat",
                 "tambahkan",
                 "carilah",
@@ -235,6 +293,17 @@ class ContentClassifier:
                 "gunakan",
                 "kerjakan",
                 "lakukan",
+
+                # English
+                "create",
+                "add",
+                "find",
+                "open",
+                "make",
+                "write",
+                "build",
+                "use",
+                "complete",
             ]
 
             if any(
@@ -269,32 +338,60 @@ class ContentClassifier:
         # --------------------------------------------------
         # Short title-like text
         #
-        # Conservative rule:
-        # - <= 8 words
-        # - no sentence punctuation
+        # Only classify short text as structure when it
+        # looks like an actual heading.
         # --------------------------------------------------
 
         words = normalized.split()
 
-        if (
+        if not (
             1 <= len(words) <= 8
-            and not normalized.endswith(".")
-            and not normalized.endswith("?")
-            and not normalized.endswith("!")
-            and not normalized.endswith(":")
         ):
-            return True
+            return False
 
-        return False
+        # Sentence punctuation
+        if (
+            normalized.endswith(".")
+            or normalized.endswith("?")
+            or normalized.endswith("!")
+            or normalized.endswith(":")
+        ):
+            return False
 
-    # ======================================================
-    # HELPERS
-    # ======================================================
+        # --------------------------------------------------
+        # Prevent obvious non-structure content
+        # --------------------------------------------------
+
+        if normalized.startswith("source"):
+            return False
+
+        if normalized.startswith("http"):
+            return False
+
+        if normalized.startswith("www."):
+            return False
+
+        if normalized == "table of contents":
+            return False
+
+        # --------------------------------------------------
+        # A short phrase without sentence punctuation
+        # can be treated as a heading.
+        # --------------------------------------------------
+
+        return True
 
     def normalize(self, text: str) -> str:
 
-        text = text.replace("\u200b", " ")
-        text = text.replace("\xa0", " ")
+        text = text.replace(
+            "\u200b",
+            " ",
+        )
+
+        text = text.replace(
+            "\xa0",
+            " ",
+        )
 
         text = re.sub(
             r"\s+",
