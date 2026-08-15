@@ -170,6 +170,25 @@ class ContentClassifier:
 
         normalized = self.normalize(text)
 
+        # If the block contains explanation keywords, it is theory rather than code.
+        explanation_indicators = [
+            r"\badalah\b",
+            r"\bmerupakan\b",
+            r"\byaitu\b",
+            r"\bberarti\b",
+            r"\bdigunakan\b",
+            r"\bberfungsi\b",
+            r"\bsebagai\b",
+            r"\bartinya\b",
+            r"\brefers to\b",
+            r"\bmeans\b",
+            r"\bdefinisi\b",
+            r"\bpengertian\b",
+            r"\bkegunaan\b",
+        ]
+        if any(re.search(pat, normalized) for pat in explanation_indicators):
+            return False
+
         # --------------------------------------------------
         # HTML
         # --------------------------------------------------
