@@ -1,5 +1,7 @@
 .venv/
 
+.venv1/
+
 .env
 
 __pycache__/
@@ -10,7 +12,9 @@ chroma_db/
 
 knowledge_base/
 
-CONCEPTA_POC_PROGRESS
+CONCEPTA_POC_PROGRESS.md
 
 tests/
+
+docs/
 

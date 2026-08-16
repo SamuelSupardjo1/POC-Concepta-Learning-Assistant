@@ -1,4 +1,38 @@
-# CONCEPTA — POC Progress & Development Guide
+# CONCEPTA — Intelligent Learning Assistant
+### Skripsi — Samuel Supardjo (535230002) — Timedoor Academy
+
+---
+
+## 🟢 Status Terkini (Agustus 2026)
+
+| Komponen | Status |
+|----------|--------|
+| PDF Loader (PyPDFLoader / LangChain) | ✅ Done |
+| Embedding — `multilingual-e5-small` | ✅ Done |
+| Preprocessing (segmentasi, ekstraksi teori, noise filter) | ✅ Done |
+| Baseline Chunker — RecursiveCharacterTextSplitter | ✅ Done |
+| Structure-Aware Chunker | ✅ Done |
+| Indexing Pipeline | ✅ Done |
+| ChromaDB Vector Store | ✅ Done |
+| LLM — Qwen2.5:1.5b via Ollama | ✅ Done |
+| RAG Pipeline (retrieval + guardrail + answer) | ✅ Done |
+| Robustness Test — 30/30 (100%) | ✅ Done |
+| Precision@5 Evaluation | ⏳ Planned |
+| End-to-End Test Scenario | ⏳ Planned |
+| Streamlit Frontend | ⏳ Planned |
+
+### Hasil Eksperimen Pertama
+> **Unified Robustness Test: 30/30 = 100% pass rate**
+> Mengukur perilaku fungsional sistem end-to-end (functional correctness).
+> Evaluasi Precision@5 (perbandingan chunking) akan dilaksanakan pada eksperimen berikutnya.
+
+
+📁 **Dokumen Konsultasi:** lihat folder `docs/`
+- `docs/konfigurasi_skripsi.md`
+- `docs/skema_final.md`
+- `docs/notes_evaluasi.md`
+
+---
 
 ## 1. Project Overview
 

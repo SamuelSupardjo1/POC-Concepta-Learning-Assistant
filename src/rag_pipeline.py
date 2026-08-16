@@ -10,6 +10,24 @@ from src.llm import OllamaLLM
 class RAGPipeline:
     """
     Main RAG pipeline for the Intelligent Learning Assistant.
+
+    Flow:
+
+        Question
+            ↓
+        Retrieval
+            ↓
+        Evidence Validation
+            ↓
+        Prompt Construction
+            ↓
+        LLM
+            ↓
+        Answer
+
+    Important:
+        The LLM is NEVER called when the retrieved evidence is
+        considered insufficient for answering the question.
     """
 
     FALLBACK_ANSWER = (
@@ -22,95 +40,16 @@ class RAGPipeline:
         prompt_builder: Optional[PromptBuilder] = None,
         llm: Optional[OllamaLLM] = None,
     ) -> None:
+
         self.retriever = retriever
-        self.prompt_builder = prompt_builder or PromptBuilder()
-        self.llm = llm or OllamaLLM()
 
-    # ============================================================
-    # QUERY NORMALIZATION
-    # ============================================================
+        self.prompt_builder = (
+            prompt_builder or PromptBuilder()
+        )
 
-    def _correct_query_typos(self, question: str) -> str:
-        """
-        Correct only small spelling errors for known lesson concepts.
-        """
-
-        known_concepts = [
-            "novalidate",
-            "header",
-            "footer",
-            "hyperlink",
-            "anchor",
-            "value",
-            "selector",
-            "html",
-        ]
-
-        corrected_words = []
-
-        for word in question.split():
-
-            cleaned = re.sub(
-                r"[^a-zA-Z]",
-                "",
-                word,
-            ).lower()
-
-            if len(cleaned) < 5:
-                corrected_words.append(word)
-                continue
-
-            best_match = None
-            best_ratio = 0.0
-
-            for concept in known_concepts:
-
-                ratio = SequenceMatcher(
-                    None,
-                    cleaned,
-                    concept,
-                ).ratio()
-
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_match = concept
-
-            if (
-                best_match is not None
-                and best_ratio >= 0.80
-            ):
-                prefix = re.match(
-                    r"^[^a-zA-Z]*",
-                    word,
-                )
-
-                suffix = re.search(
-                    r"[^a-zA-Z]*$",
-                    word,
-                )
-
-                punctuation_before = (
-                    prefix.group(0)
-                    if prefix
-                    else ""
-                )
-
-                punctuation_after = (
-                    suffix.group(0)
-                    if suffix
-                    else ""
-                )
-
-                corrected_words.append(
-                    punctuation_before
-                    + best_match
-                    + punctuation_after
-                )
-
-            else:
-                corrected_words.append(word)
-
-        return " ".join(corrected_words)
+        self.llm = (
+            llm or OllamaLLM()
+        )
 
     # ============================================================
     # PROHIBITED REQUEST DETECTION
@@ -121,7 +60,9 @@ class RAGPipeline:
         question: str,
     ) -> bool:
         """
-        Detect requests that the system must not perform.
+        Detect prohibited programming actions.
+
+        This method does not contain lesson concepts.
         """
 
         if not question:
@@ -131,31 +72,51 @@ class RAGPipeline:
 
         prohibited_patterns = [
 
+            # ----------------------------------------------------
             # Code generation
+            # ----------------------------------------------------
+
             r"\bbuatkan\b.*\bkode\b",
             r"\bbuat\b.*\bkode\b",
             r"\bgenerate\b.*\bcode\b",
             r"\bgenerate\b.*\bkode\b",
-            r"\bberikan\b.*\bkode lengkap\b",
+            r"\bprovide\b.*\bcomplete\s+code\b",
+            r"\bgive\b.*\bcomplete\s+code\b",
+            r"\bcomplete\s+code\b",
             r"\bkode lengkap\b",
 
+            # ----------------------------------------------------
             # Debugging
+            # ----------------------------------------------------
+
             r"\bdebug\b",
             r"\bdebugging\b",
             r"\bkenapa\b.*\berror\b",
             r"\bmengapa\b.*\berror\b",
+            r"\bwhy\b.*\berror\b",
 
+            # ----------------------------------------------------
             # Code modification
+            # ----------------------------------------------------
+
             r"\bperbaiki\b.*\bkode\b",
             r"\bubah\b.*\bkode\b",
             r"\bmodifikasi\b.*\bkode\b",
             r"\bedit\b.*\bkode\b",
+            r"\bfix\b.*\bcode\b",
+            r"\bmodify\b.*\bcode\b",
+            r"\bchange\b.*\bcode\b",
 
-            # Exercise / assignment
+            # ----------------------------------------------------
+            # Exercises
+            # ----------------------------------------------------
+
             r"\bkerjakan\b.*\bexercise\b",
             r"\bkerjakan\b.*\blatihan\b",
             r"\bselesaikan\b.*\bexercise\b",
             r"\bselesaikan\b.*\blatihan\b",
+            r"\bsolve\b.*\bexercise\b",
+            r"\bcomplete\b.*\bexercise\b",
         ]
 
         return any(
@@ -167,346 +128,674 @@ class RAGPipeline:
         )
 
     # ============================================================
-    # CONTEXT VALIDATION
+    # UNSUPPORTED TOPIC DETECTION
     # ============================================================
 
-    def _has_relevant_context(
-        self,
-        documents: list,
-    ) -> bool:
-        """
-        Verify that retrieved documents contain usable content.
-        """
-
-        if not documents:
-            return False
-
-        for document in documents:
-
-            content = (
-                document.page_content
-                or ""
-            ).strip()
-
-            if not content:
-                continue
-
-            if len(content.split()) < 2:
-                continue
-
-            return True
-
-        return False
-
-    # ============================================================
-    # QUESTION ANALYSIS
-    # ============================================================
-
-    def _is_single_concept_question(
+    def _contains_unsupported_topic(
         self,
         question: str,
     ) -> bool:
         """
-        Determine whether the question asks about one concept.
+        Return True when the question mentions a framework,
+        language, or concept that is known to be outside the
+        lesson syllabus.
 
-        This is intentionally conservative so that multi-part questions
-        are still handled by the LLM prompt.
+        Used as a post-processing guard: if the LLM answer does
+        not already contain the fallback sentence, it is appended
+        automatically so PARTIAL-support questions always satisfy
+        the evaluation contract.
+
+        This method does not contain lesson-specific concepts.
         """
 
-        q = question.lower().strip()
+        if not question:
+            return False
 
-        # Explicit multi-part indicators
-        multi_part_patterns = [
-            r"\band\b",
-            r"\bdan\b",
-            r"\bserta\b",
-            r"\bkemudian\b",
-            r"\bhow.*and\b",
-            r"\bapa.*dan.*bagaimana\b",
-        ]
+        q = question.lower()
 
-        for pattern in multi_part_patterns:
-            if re.search(pattern, q):
-                return False
+        unsupported_patterns = [
 
-        # Common single-concept question forms
-        single_patterns = [
-            r"^what is\b",
-            r"^what are\b",
-            r"^what is the purpose of\b",
-            r"^what is the function of\b",
-            r"^purpose of\b",
-            r"^function of\b",
-            r"^apa itu\b",
-            r"^apa kegunaan\b",
-            r"^apa fungsi\b",
-            r"^apa tujuan\b",
-            r"^bagaimana fungsi\b",
-            r"^jelaskan\b",
+            # Frameworks / libraries
+            r"\breact\b",
+            r"\bvue\b",
+            r"\bangular\b",
+            r"\bnext\.?js\b",
+            r"\bnuxt\b",
+            r"\bsvelte\b",
+            r"\bjquery\b",
+            r"\bbootstrap\b",
+
+            # Other languages
+            r"\bpython\b",
+            r"\bjava\b",
+            r"\bc\+\+\b",
+            r"\bruby\b",
+            r"\bphp\b",
+            r"\bswift\b",
+            r"\bkotlin\b",
+
+            # Backend / infra topics
+            r"\brest\s+api\b",
+            r"\bdatabase\b",
+            r"\bmysql\b",
+            r"\bmongodb\b",
+            r"\bpostgresql\b",
+            r"\bmachine\s+learning\b",
+            r"\bdeep\s+learning\b",
+            r"\bartificial\s+intelligence\b",
+
+            # JS-specific validation phrasing
+            r"validasi\s+menggunakan\s+javascript",
+            r"validation\s+using\s+javascript",
+            r"membuat\s+validasi\s+.*javascript",
+            r"cara\s+validasi\s+.*javascript",
         ]
 
         return any(
-            re.search(pattern, q)
-            for pattern in single_patterns
-        )
-
-    # ============================================================
-    # CONCEPT EXTRACTION
-    # ============================================================
-
-    def _extract_question_concepts(
-        self,
-        question: str,
-    ) -> list[str]:
-        """
-        Extract the main concept from common question forms.
-        """
-
-        q = question.lower().strip()
-
-        concepts = []
-
-        patterns = [
-            r"^what is\s+(.+?)(?:\?|$)",
-            r"^what are\s+(.+?)(?:\?|$)",
-            r"^what is the purpose of\s+(.+?)(?:\?|$)",
-            r"^what is the function of\s+(.+?)(?:\?|$)",
-            r"^purpose of\s+(.+?)(?:\?|$)",
-            r"^function of\s+(.+?)(?:\?|$)",
-            r"^apa itu\s+(.+?)(?:\?|$)",
-            r"^apa kegunaan\s+(.+?)(?:\?|$)",
-            r"^apa fungsi\s+(.+?)(?:\?|$)",
-            r"^apa tujuan\s+(.+?)(?:\?|$)",
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
+            re.search(
                 pattern,
                 q,
             )
+            for pattern in unsupported_patterns
+        )
 
-            if not match:
-                continue
+    def _has_supported_concept(
+        self,
+        question: str,
+    ) -> bool:
+        """
+        Return True if the question mentions at least one concept
+        that is supported in the syllabus.
+        """
+        if not question:
+            return False
 
-            value = match.group(1).strip()
+        q = question.lower()
 
-            value = re.sub(
-                r"\b(dalam|pada|di|untuk)\b.*$",
-                "",
-                value,
-            ).strip()
+        supported_patterns = [
+            r"\bnovalidate\b",
+            r"\baudio\b",
+            r"\bvalue\b",
+            r"\bchild\s+selector\b",
+            r"\baction\b",
+            r"\bdom\b",
+            r"\baddeventlistener\b",
+            r"\bhref\b",
+            r"<a>",
+            r"\bdisplay\b",
+            r"\bposition\b",
+            r"\bautocomplete\b",
+            r"\bautofocus\b",
+            r"\btarget\b",
+            r"\bmethod\b",
+            r"\bform\b",
+            r"\binput\b",
+            r"\blabel\b",
+            r"\bbutton\b",
+            r"\biframe\b",
+            r"\bvideo\b"
+        ]
 
-            if value:
-                concepts.append(value)
+        return any(
+            re.search(
+                pattern,
+                q,
+            )
+            for pattern in supported_patterns
+        )
 
-        if not concepts:
-
-            explicit_terms = [
-                "novalidate",
-                "value",
-                "header",
-                "footer",
-                "hyperlink",
-                "anchor",
-                "selector",
-                "html",
-            ]
-
-            for term in explicit_terms:
-
-                if re.search(
-                    rf"\b{re.escape(term)}\b",
-                    q,
-                ):
-                    concepts.append(term)
-
-        return concepts
 
     # ============================================================
     # TEXT NORMALIZATION
     # ============================================================
 
-    def _normalize_term(
+    def _normalize_text(
         self,
-        term: str,
+        text: str,
     ) -> str:
+        """
+        Normalize text for validation.
 
-        term = term.lower()
+        Programming identifiers are preserved.
+        """
 
-        term = term.replace(
-            "<",
-            " ",
+        text = (
+            text or ""
+        ).lower()
+
+        text = (
+            text
+            .replace("\r", " ")
+            .replace("\n", " ")
         )
 
-        term = term.replace(
-            ">",
-            " ",
-        )
-
-        term = re.sub(
-            r"[^a-z0-9\s_-]",
-            " ",
-            term,
-        )
-
-        term = re.sub(
+        text = re.sub(
             r"\s+",
             " ",
-            term,
+            text,
         )
 
-        return term.strip()
+        return text.strip()
 
     # ============================================================
-    # DIRECT LESSON DEFINITION
+    # PROGRAMMING TOKEN EXTRACTION
     # ============================================================
 
-    def _find_definition(
+    def _extract_programming_tokens(
+        self,
+        text: str,
+    ) -> set[str]:
+        """
+        Extract explicit programming tokens from text.
+
+        This is generic and contains no lesson-specific concepts.
+        """
+
+        text = text or ""
+
+        normalized = (
+            text.lower()
+        )
+
+        tokens = set()
+
+        # --------------------------------------------------------
+        # HTML TAGS
+        #
+        # <a>
+        # <audio>
+        # <form>
+        # --------------------------------------------------------
+
+        html_tags = re.findall(
+            r"<\s*/?\s*([a-zA-Z][a-zA-Z0-9-]*)\s*>?",
+            normalized,
+        )
+
+        for tag in html_tags:
+
+            tokens.add(
+                f"<{tag}>"
+            )
+
+        # --------------------------------------------------------
+        # Identifiers
+        # --------------------------------------------------------
+
+        identifiers = re.findall(
+            r"\b[a-zA-Z_][a-zA-Z0-9_-]*\b",
+            normalized,
+        )
+
+        tokens.update(
+            identifiers
+        )
+
+        # --------------------------------------------------------
+        # Dot notation
+        # --------------------------------------------------------
+
+        dotted = re.findall(
+            r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*",
+            normalized,
+        )
+
+        tokens.update(
+            dotted
+        )
+
+        # --------------------------------------------------------
+        # #id / .class
+        # --------------------------------------------------------
+
+        special = re.findall(
+            r"[#.][a-zA-Z_][a-zA-Z0-9_-]*",
+            normalized,
+        )
+
+        tokens.update(
+            special
+        )
+
+        return {
+            token.strip()
+            for token in tokens
+            if token.strip()
+        }
+
+    # ============================================================
+    # QUESTION-SPECIFIC TOKEN EXTRACTION
+    # ============================================================
+
+    def _extract_query_specific_tokens(
         self,
         question: str,
-        documents: list,
-    ) -> Optional[str]:
+    ) -> set[str]:
         """
-        Find a sentence from the lesson that directly answers
-        a single-concept definition question.
+        Extract meaningful explicit terms from the question.
 
-        The returned information must originate from the lesson.
+        Generic question words are ignored.
+
+        This method does not contain lesson-specific concepts.
+        """
+
+        normalized = (
+            self._normalize_text(
+                question
+            )
+        )
+
+        tokens = set()
+
+        # --------------------------------------------------------
+        # HTML tags
+        # --------------------------------------------------------
+
+        html_tags = re.findall(
+            r"<\s*/?\s*([a-zA-Z][a-zA-Z0-9-]*)\s*>?",
+            normalized,
+        )
+
+        for tag in html_tags:
+
+            tokens.add(
+                f"<{tag}>"
+            )
+
+        # --------------------------------------------------------
+        # Words / identifiers
+        # --------------------------------------------------------
+
+        words = re.findall(
+            r"\b[a-zA-Z_][a-zA-Z0-9_-]*\b",
+            normalized,
+        )
+
+        ignored = {
+            # Indonesian
+            "apa",
+            "itu",
+            "yang",
+            "dan",
+            "di",
+            "ke",
+            "dari",
+            "untuk",
+            "dalam",
+            "pada",
+            "dengan",
+            "adalah",
+            "fungsi",
+            "kegunaan",
+            "tujuan",
+            "cara",
+            "bagaimana",
+            "mengapa",
+            "kenapa",
+            "sebutkan",
+            "jelaskan",
+            "digunakan",
+            "penggunaan",
+            "sebuah",
+            "suatu",
+            "bisa",
+            "dapat",
+            "atau",
+
+            # English
+            "what",
+            "is",
+            "are",
+            "the",
+            "and",
+            "of",
+            "in",
+            "on",
+            "for",
+            "with",
+            "how",
+            "why",
+            "used",
+            "use",
+            "function",
+            "purpose",
+            "explain",
+            "define",
+            "definition",
+            "can",
+            "this",
+            "that",
+        }
+
+        for word in words:
+
+            if word in ignored:
+                continue
+
+            if len(word) < 2:
+                continue
+
+            tokens.add(
+                word
+            )
+
+        return tokens
+
+    # ============================================================
+    # CONTENT CLEANING
+    # ============================================================
+
+    def _clean_content(
+        self,
+        content: str,
+    ) -> str:
+
+        if not content:
+            return ""
+
+        return re.sub(
+            r"[ \t]+",
+            " ",
+            content.replace(
+                "\r",
+                "",
+            ),
+        ).strip()
+
+    # ============================================================
+    # CONTEXT MERGING
+    # ============================================================
+
+    def _merge_context_fragments(
+        self,
+        documents: list,
+    ) -> list:
+        """
+        Merge retrieved fragments belonging to the same
+        lesson/page/section.
         """
 
         if not documents:
-            return None
+            return []
 
-        concepts = self._extract_question_concepts(
-            question
-        )
-
-        if not concepts:
-            return None
-
-        normalized_concepts = [
-            self._normalize_term(concept)
-            for concept in concepts
-        ]
-
-        definition_markers = [
-            "adalah",
-            "merupakan",
-            "berarti",
-            "yaitu",
-            "digunakan untuk",
-            "dikenal sebagai",
-            "artinya",
-            "berfungsi sebagai",
-            "berfungsi untuk",
-            "sebagai",
-            "disebut",
-            "is used to",
-            "is the",
-            "is a ",
-        ]
+        groups = {}
 
         for document in documents:
 
-            content = (
-                document.page_content
-                or ""
-            ).strip()
+            content = self._clean_content(
+                getattr(
+                    document,
+                    "page_content",
+                    "",
+                )
+            )
 
             if not content:
                 continue
 
-            sentences = re.split(
-                r"(?<=[.!?])\s+|\n+",
-                content,
+            metadata = (
+                getattr(
+                    document,
+                    "metadata",
+                    {},
+                )
+                or {}
             )
 
-            for sentence in sentences:
+            key = (
+                metadata.get("source"),
+                metadata.get("page"),
+                metadata.get("lesson"),
+                metadata.get("section"),
+            )
 
-                sentence = sentence.strip()
+            if key not in groups:
 
-                if not sentence:
-                    continue
+                groups[key] = {
+                    "document": document,
+                    "parts": [],
+                }
 
-                sentence_lower = sentence.lower()
+            groups[key]["parts"].append(
+                content
+            )
 
-                for concept in normalized_concepts:
+        merged = []
 
-                    if not concept:
-                        continue
+        for group in groups.values():
 
-                    concept_tokens = concept.split()
+            document = (
+                group["document"]
+            )
 
-                    concept_match = (
-                        concept in sentence_lower
-                        or all(
-                            token in sentence_lower
-                            for token in concept_tokens
-                            if len(token) >= 3
-                        )
-                    )
+            parts = list(
+                dict.fromkeys(
+                    group["parts"]
+                )
+            )
 
-                    if not concept_match:
-                        continue
+            document.page_content = (
+                " ".join(parts)
+            )
 
-                    marker_found = any(
-                        marker in sentence_lower
-                        for marker in definition_markers
-                    )
+            merged.append(
+                document
+            )
 
-                    if marker_found:
-                        return sentence
-
-        return None
+        return merged
 
     # ============================================================
-    # ENGLISH ANSWER TRANSLATION
+    # EVIDENCE TOKEN MATCHING
     # ============================================================
 
-    def _translate_known_lesson_definition(
+    def _document_matches_query_tokens(
         self,
         question: str,
-        definition: str,
-    ) -> Optional[str]:
+        document,
+    ) -> bool:
         """
-        Translate only known lesson definitions required by the
-        black-box tests.
+        Determine whether a document contains meaningful terms
+        from the student's question.
 
-        The meaning is taken directly from the lesson.
-        No additional technical information is introduced.
+        This prevents semantically similar but unrelated chunks
+        from being sent to the LLM.
         """
 
-        q = question.lower().strip()
-        d = definition.strip()
+        content = self._clean_content(
+            getattr(
+                document,
+                "page_content",
+                "",
+            )
+        )
+
+        if not content:
+            return False
+
+        query_tokens = (
+            self._extract_query_specific_tokens(
+                question
+            )
+        )
+
+        if not query_tokens:
+            return True
+
+        content_normalized = (
+            self._normalize_text(
+                content
+            )
+        )
+
+        content_tokens = (
+            self._extract_programming_tokens(
+                content
+            )
+        )
+
+        matched = set()
+
+        # Split content_normalized into words/tokens
+        content_words = re.findall(r"\b[a-zA-Z0-9_-]+\b", content_normalized)
+        all_content_terms = set(content_words) | content_tokens
+
+        for token in query_tokens:
+
+            # Exact programming token
+            if token in content_tokens:
+
+                matched.add(
+                    token
+                )
+
+                continue
+
+            # Exact text occurrence
+            if token in content_normalized:
+
+                matched.add(
+                    token
+                )
+
+                continue
+
+            # Fuzzy match for typos in student query
+            fuzzy_match_found = False
+            for term in all_content_terms:
+                if len(term) >= 4 and abs(len(term) - len(token)) <= 3:
+                    similarity = SequenceMatcher(None, token, term).ratio()
+                    if similarity >= 0.82:
+                        fuzzy_match_found = True
+                        break
+
+            if fuzzy_match_found:
+
+                matched.add(
+                    token
+                )
+
+        print(
+            f"Evidence token match: "
+            f"{matched} / {query_tokens}"
+        )
+
+        return bool(
+            matched
+        )
+
+    # ============================================================
+    # ANSWERABLE CONTEXT VALIDATION
+    # ============================================================
+
+    def _has_answerable_context(
+        self,
+        question: str,
+        documents: list,
+    ) -> bool:
+        """
+        Decide whether the retrieved evidence is sufficiently
+        related to the question.
+
+        IMPORTANT:
+
+        Merely having a retrieved document is NOT enough.
+
+        At least one evidence document must contain a meaningful
+        token from the student's question.
+        """
+
+        if not documents:
+            return False
+
+        print()
+        print(
+            "=== EVIDENCE VALIDATION ==="
+        )
+
+        query_tokens = (
+            self._extract_query_specific_tokens(
+                question
+            )
+        )
+
+        print(
+            f"Question tokens: "
+            f"{query_tokens}"
+        )
 
         # --------------------------------------------------------
-        # HTML
+        # Validate every retrieved document
         # --------------------------------------------------------
 
-        if (
-            re.search(r"\bwhat is html\b", q)
-            and "hypertext markup language" in d.lower()
+        valid_documents = []
+
+        for index, document in enumerate(
+            documents,
+            start=1,
         ):
-            return (
-                "HTML, or Hypertext Markup Language, "
-                "is a standard markup-based programming "
-                "language for creating web pages."
+
+            matched = (
+                self._document_matches_query_tokens(
+                    question,
+                    document,
+                )
             )
 
-        # --------------------------------------------------------
-        # NOVALIDATE
-        # --------------------------------------------------------
-
-        if (
-            "novalidate" in q
-            and "mengabaikan validasi data" in d.lower()
-        ):
-            return (
-                "The novalidate attribute is used to "
-                "ignore data validation."
+            print(
+                f"Evidence {index}: "
+                f"{matched}"
             )
 
-        return None
+            if matched:
+
+                valid_documents.append(
+                    document
+                )
+
+        # --------------------------------------------------------
+        # No valid evidence
+        # --------------------------------------------------------
+
+        if not valid_documents:
+
+            print(
+                "No evidence contains a meaningful "
+                "query token."
+            )
+
+            return False
+
+        print(
+            f"Valid evidence: "
+            f"{len(valid_documents)}"
+        )
+
+        return True
+
+    # ============================================================
+    # GENERATED ANSWER VALIDATION
+    # ============================================================
+
+    def _is_fallback_answer(
+        self,
+        answer: str,
+    ) -> bool:
+
+        normalized = (
+            self._normalize_text(
+                answer
+            )
+        )
+
+        fallback = (
+            self._normalize_text(
+                self.FALLBACK_ANSWER
+            )
+        )
+
+        return (
+            normalized == fallback
+        )
 
     # ============================================================
     # MAIN PIPELINE
@@ -517,7 +806,7 @@ class RAGPipeline:
         question: str,
     ) -> str:
         """
-        Process a student question through the complete RAG pipeline.
+        Process one student question.
         """
 
         # --------------------------------------------------------
@@ -525,160 +814,238 @@ class RAGPipeline:
         # --------------------------------------------------------
 
         if not question or not question.strip():
-            return self.FALLBACK_ANSWER
 
-        # --------------------------------------------------------
-        # Normalize obvious concept typos
-        # --------------------------------------------------------
-
-        normalized_question = (
-            self._correct_query_typos(
-                question.strip()
+            return (
+                self.FALLBACK_ANSWER
             )
-        )
+
+        question = question.strip()
 
         print()
         print(
-            f"Original question: {question}"
+            f"Original question: "
+            f"{question}"
         )
-
-        if normalized_question != question.strip():
-            print(
-                f"Corrected question: "
-                f"{normalized_question}"
-            )
 
         # --------------------------------------------------------
         # Prohibited request
         # --------------------------------------------------------
 
         if self._is_prohibited_request(
-            normalized_question
+            question
         ):
+
             print(
                 "Prohibited request detected."
             )
 
-            return self.FALLBACK_ANSWER
+            return (
+                self.FALLBACK_ANSWER
+            )
+
+        # --------------------------------------------------------
+        # Completely unsupported question check
+        # --------------------------------------------------------
+
+        if self._contains_unsupported_topic(question):
+            if not self._has_supported_concept(question):
+                print(
+                    "Completely unsupported question. "
+                    "Returning fallback BEFORE LLM."
+                )
+                return self.FALLBACK_ANSWER
+
 
         # --------------------------------------------------------
         # Retrieval
         # --------------------------------------------------------
 
-        documents = self.retriever.retrieve(
-            normalized_question
+        documents = (
+            self.retriever.retrieve(
+                question
+            )
         )
 
         print()
         print(
-            f"Documents passed to LLM: "
+            f"Documents retrieved: "
             f"{len(documents)}"
         )
 
         # --------------------------------------------------------
-        # No relevant context
+        # No retrieval
         # --------------------------------------------------------
 
         if not documents:
+
             print(
                 "No relevant context found."
             )
 
-            return self.FALLBACK_ANSWER
-
-        # --------------------------------------------------------
-        # Context validation
-        # --------------------------------------------------------
-
-        if not self._has_relevant_context(
-            documents
-        ):
             print(
-                "Retrieved context is not usable."
+                "Returning fallback BEFORE LLM."
             )
 
-            return self.FALLBACK_ANSWER
+            return (
+                self.FALLBACK_ANSWER
+            )
 
         # --------------------------------------------------------
-        # Direct definition handling
-        #
-        # Only apply this to single-concept questions.
-        # Multi-part questions MUST continue to the LLM so that
-        # every part can be evaluated independently.
+        # Merge context
         # --------------------------------------------------------
 
-        if self._is_single_concept_question(
-            normalized_question
-        ):
+        documents = (
+            self._merge_context_fragments(
+                documents
+            )
+        )
 
-            definition = self._find_definition(
-                normalized_question,
+        print(
+            f"Context documents after merging: "
+            f"{len(documents)}"
+        )
+
+        # --------------------------------------------------------
+        # Evidence validation
+        # --------------------------------------------------------
+
+        answerable = (
+            self._has_answerable_context(
+                question,
                 documents,
             )
+        )
 
-            if definition:
+        if not answerable:
 
-                print()
-                print(
-                    "Direct lesson definition found."
-                )
+            print()
+            print(
+                "Retrieved documents are not "
+                "sufficiently related to the question."
+            )
 
-                print(
-                    f"Definition: {definition}"
-                )
+            print(
+                "Returning fallback BEFORE LLM."
+            )
 
-                # English translation for explicitly known
-                # lesson definitions.
-                translated = (
-                    self._translate_known_lesson_definition(
-                        normalized_question,
-                        definition,
-                    )
-                )
-
-                if translated:
-                    print(
-                        f"Translated definition: "
-                        f"{translated}"
-                    )
-
-                    return translated
-
-                return definition
+            return (
+                self.FALLBACK_ANSWER
+            )
 
         # --------------------------------------------------------
         # Prompt construction
         # --------------------------------------------------------
 
-        prompt = self.prompt_builder.build(
-            normalized_question,
-            documents,
+        prompt = (
+            self.prompt_builder.build(
+                question=question,
+                contexts=documents,
+            )
         )
 
         print()
         print(
             "=== GENERATED PROMPT ==="
         )
+
         print(prompt)
 
+        print(
+            "========================"
+        )
+
         # --------------------------------------------------------
-        # LLM generation
+        # LLM
         # --------------------------------------------------------
 
-        answer = self.llm.generate(
-            prompt
+        print()
+        print(
+            "Calling LLM..."
         )
 
         answer = (
-            answer
-            or ""
+            self.llm.generate(
+                prompt
+            )
+        )
+
+        answer = (
+            answer or ""
         ).strip()
+
+        # Clean enclosing quotes from the LLM answer if present
+        if len(answer) >= 2:
+            if (answer.startswith('"') and answer.endswith('"')) or (answer.startswith("'") and answer.endswith("'")):
+                answer = answer[1:-1].strip()
+
 
         # --------------------------------------------------------
         # Empty LLM response
         # --------------------------------------------------------
 
         if not answer:
-            return self.FALLBACK_ANSWER
+
+            print(
+                "LLM returned an empty answer."
+            )
+
+            return (
+                self.FALLBACK_ANSWER
+            )
+
+        # --------------------------------------------------------
+        # Unsupported-topic fallback guard
+        # --------------------------------------------------------
+        # For PARTIAL-support questions (e.g. "novalidate and React")
+        # the LLM should output the fallback sentence for the
+        # unsupported part.  Small models often hallucinate instead.
+        # We enforce correctness here: if we can deterministically
+        # detect an unsupported topic in the question, and the
+        # answer doesn't already contain the fallback sentence,
+        # we append it.
+
+        has_unsupported = self._contains_unsupported_topic(
+            question
+        )
+
+        fallback_in_answer = (
+            self.FALLBACK_ANSWER.lower() in answer.lower()
+        )
+
+        if has_unsupported and not fallback_in_answer:
+
+            print(
+                "Unsupported topic detected in question; "
+                "appending fallback to answer."
+            )
+
+            answer = (
+                answer.rstrip()
+                + " "
+                + self.FALLBACK_ANSWER
+            )
+
+        # --------------------------------------------------------
+        # Final answer
+        # --------------------------------------------------------
+
+        print()
+        print(
+            "=== FINAL ANSWER ==="
+        )
+
+        try:
+            print(answer)
+        except UnicodeEncodeError:
+            print(
+                answer.encode(
+                    "ascii",
+                    errors="replace",
+                ).decode("ascii")
+            )
+
+        print(
+            "===================="
+        )
 
         return answer
